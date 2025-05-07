@@ -26,16 +26,6 @@ suppressPackageStartupMessages({
 })
 ```
 
-```{r load-data, echo = FALSE}
-# Before running this, run `01-fetch.R`, `02-tracts.R`, and `03-community-areas.R` (in that order)
-# to fetch and process the data.
-
-data_dir <- file.path("data")
-# tracts <- read_sf(file.path(data_dir, "tracts.geojson"))
-ccas <- read_sf(file.path(data_dir, "ccas.geojson"))
-cca_flows <- read_csv(file.path(data_dir, "cca_flows.csv"), col_types = "ccid")
-```
-
 # Data sources
 
 ## LODES

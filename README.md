@@ -1,6 +1,8 @@
 # Zeke's SOC618 (Social Network Analysis) Project
 
-## Data sources
+## Data Sources
+
+### LODES
 
 **[LODES Documentation](https://lehd.ces.census.gov/doc/help/onthemap/LODESTechDoc.pdf)**
 
@@ -17,3 +19,13 @@
   - `h_geocode`: residence census block code
   - `S000`: number of jobs
   - `SXXX`: other related variables that could be useful later on
+
+### Census tract shapefiles
+
+We need these to graph the census tracts. [Documentation
+here.](https://www.census.gov/programs-surveys/geography/technical-documentation/complete-technical-documentation/tiger-geo-line.html)
+
+### Census tract to Chicago Community Areas (CCAs) relationships
+
+These data are provided by [UChicago's Spatial Data
+Resources](https://guides.lib.uchicago.edu/c.php?g=720045&p=8072546).
