@@ -5,13 +5,8 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
-# To do
-
-- Move all code to this Rmd, clean it up
-
 ```{r setup, include=FALSE}
-# Since this is a report, don't include code unless otherwise specified
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = TRUE)
 
 # Fetch and load the data
 source("setup.R")
@@ -23,62 +18,344 @@ suppressPackageStartupMessages({
   library(ggraph)
   library(tmap)
   library(ggrepel)
+  library(blockmodeling)
 })
 ```
 
-# Data sources
+# Final Visualizations
 
-## LODES
+## Introductory Visualizations
 
-The network data for this project comes from the Longitudinal Employer-Household
-Dynamics (LEHD), a program of the Center for Economic Studies at the U.S. Census Bureau.
-They maintain the LEHD Origin-Destination Employment Statistics (LODES), which records the
-number of people who live in one census block and work in another for year from 2002 to 2022.
-The complete data represent a longitudinal, directed, weighted network with millions of nodes.
+```{r utility-functions}
+create_graph <- function(flows) {
+  g <- tbl_graph(edges = flows) %>%
+    activate(edges) %>%
+    # Make edges weighted by flow size
+    mutate(weight = n) %>%
+    activate(nodes) %>%
+    # For some reason simply passing `nodes = ccas` doesn't work, but this does the same
+    left_join(ccas, by = "name") %>%
+    # Compute centrality measures
+    mutate(
+      in_degree = centrality_degree(weights = n, mode = "in"),
+      out_degree = centrality_degree(weights = n, mode = "out"),
+      eigen = centrality_eigen(weights = n, directed = TRUE, scale = TRUE)
+    )
+}
 
-For this project, I'm only using the LODES for one city—Chicago—and one year—2022. The `01-fetch.R` script fetches these
-data from the LODES FTP server ([https://lehd.ces.census.gov/data/lodes/LODES8/](https://lehd.ces.census.gov/data/lodes/LODES8/)).
+g2002 <- create_graph(cca_flows_2002)
+g2022 <- create_graph(cca_flows_2022)
+# Get the commuting network for the given year
+g <- function(year) {
+  if (year == 2002) {
+    g2002
+  } else if (year == 2022) {
+    g2022
+  } else {
+    stop("Only years allowed are 2002 and 2022")
+  }
+}
 
-## Additional data sources
+get_sf <- function(year) {
+  g(year) %>%
+    activate(nodes) %>%
+    as_tibble() %>%
+    st_as_sf()
+}
+```
 
-The `01-fetch.R` script fetches two additional data sources that are used in my analysis
-and visualizations. First, we need the census tract geographic shapes, which are provided by the TIGER API.
-[Here is the documentation.](https://www.census.gov/programs-surveys/geography/technical-documentation/complete-technical-documentation/tiger-geo-line.html)
-Second, since my analysis occurs at a neighborhood level, we need a way to crosswalk from census tracts
-to Chicago community areas (CCAs). [UChicago's Spatial Data
-Resources](https://guides.lib.uchicago.edu/c.php?g=720045&p=8072546) provides a file with the boundaries of all
-Chicago community areas that we can use for this purpose.
+```{r}
+# Number of nodes
+g2022 %>% vcount()
+# Number of non-zero edges
+g2022 %E>% filter(n > 0) %>% ecount()
+```
 
-Chicago has 77 community areas as of 2025:
+```{r network-plot, fig.width=12, fig.height=8}
+set.seed(1)
+g2022 %>%
+  activate(edges) %>%
+  mutate(weight = n) %>%
+  filter(weight > quantile(weight, 0.6)) %>% # Keep only the biggest flows
+  activate(nodes) %>%
+  # Meters to km
+  mutate(distance_from_loop = distance_from_loop / 1000) %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(
+    aes(edge_alpha = weight),
+    edge_width = 0.2, edge_color = "#000",
+  ) +
+  geom_node_point(aes(color = distance_from_loop), size = 3) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  theme_void() +
+  theme_graph(
+    plot_margin = margin(10, 10, 10, 10),
+  ) +
+  theme(
+    legend.background = element_rect(),
+    legend.margin = margin(8,8,8,8),
+    legend.position = "inside",
+    legend.position.inside = c(0.95, 0.05),
+    legend.justification = c(1, 0),
+    legend.box.just = "right",
+    legend.box.margin = margin(6, 6, 6, 6),
+  ) +
+  labs(
+    color = "Distance from the Loop, km",
+    edge_alpha = "Commuting flow"
+  )
+```
+## In-degree, out-degree, and eigenvector centrality
 
-![](images/chicago-community-areas.svg)
+```{r in-degree-plot}
+# Higher-order function to create map plotting functions that change fill according to some variable
+map_by <- function(variable, legend_label, title, scale) {
+  function(year) {
+    get_sf(year) %>%
+      tm_shape() +
+      tm_polygons(
+        fill = variable,
+        fill.legend = tm_legend(title = legend_label),
+        fill.scale = scale,
+      ) +
+      tm_title(glue("{title} ({year})"))
+  }
+}
 
-<!-- At some points in my analysis, I include a 78th node named `"OUTSIDE CHICAGO"` to keep track of the number of
-residents in each CCA who work outside Chicago and the number of workers in each CCA who originate from outside Chicago. -->
+map_in_degree <- map_by("in_degree", "In-commuting flow", "Inter-CCA In-commuting", tm_scale_continuous_log(values = "brewer.oranges", limits = c(100, 300000)))
 
-# Preprocessing
+map_in_degree(2002)
+map_in_degree(2022)
+```
 
-After `01-fetch.R` saves these three data sets to files in the `data/` directory, the `02-tracts.R` and
-`03-community-areas.R` perform the following preprocessing steps:
+```{r out-degree-plot}
+map_out_degree <- map_by("out_degree", "Out-commuting flow", "Inter-CCA Out-commuting", tm_scale_continuous_log(values = "brewer.blues", limits = c(500, 40000)))
 
-1. Aggregate commuting flows from the census _block_ level to the census _tract_ level.
-2. Determine each tract's corresponding commuting area (CCA) by finding the commuting area
-   that the tract's centroid falls within.
-3. Aggregate commuting flows from the census tract level to the CCA level. All tracts
-   outside Chicago are coded as `"OUTSIDE CHICAGO"`.
-4. Compute some useful statistics for CCAs:
-   a. Pairwise distances of all CCAs
-   b. Total number of people who live in this CCA and work anywhere in Illinois
-   c. Total number of people who live in this CCA and work in Chicago
-   d. Number of people in both live and work in this CCA (i.e., don't commute) 
-   e. Total number of people who work in this CCA
-   f. Total number of people from Chicago who work in this CCA
-   g. Average distance that workers from this CCA commute
-   h. Median distance that workers from this CCA commute
+# Side by side
+tmap_arrange(map_out_degree(2002), map_out_degree(2022))
+```
 
-Finally, the processed data are saved to `data/ccas.geojson` and `data/cca_flows.csv`.
+```{r}
+map_eigen <- map_by("eigen", "Eigenvector centrality", "Eigenvector Centrality",
+  tm_scale_continuous_log(values = "viridis", limits = c(0.0001, 1)))
+map_eigen(2002)
+map_eigen(2022)
+```
 
-# Exploring the data
+```{r eigen-vs-distance, eval = FALSE}
+cca_graph %N>%
+  as_tibble() %>%
+  mutate(area = if_else(
+    st_centroid(geometry) %>% st_coordinates() %>% .[, 2] >=
+      st_centroid(filter(ccas, name == "Near West Side")$geometry) %>%
+        st_coordinates() %>%
+        .[, 2],
+    "Northern",
+    "Southern"
+  )) %>%
+  arrange(desc(eig_centrality)) %>%
+  ggplot(aes(x = distance_from_loop, y = eig_centrality)) +
+  geom_point(aes(color = area)) +
+  geom_smooth(se = FALSE, method = "lm", size = 0.5, color = "black", formula = y ~ x) +
+  # geom_smooth(aes(color = area), se = FALSE, method = "lm", size = 0.5) +
+  geom_text_repel(aes(label = name), size = 2) +
+  scale_y_log10() +
+  scale_color_brewer(palette = "Set1") +
+  theme_classic() +
+  labs(
+    title = "Eigenvector Centrality vs. Distance from the Loop",
+    subtitle = '"Northern" neighborhoods are those that are at least as far north as the Near West Side.',
+    x = "Distance from the Loop (m)",
+    y = "Eigenvector Centrality",
+    color = "Area"
+  )
+```
+
+## In-entropy and out-entropy
+
+`igraph` implements entropy with the `diversity()` function, but only for undirected graphs, so
+we'll have to implement in- and out-entropy ourselves.
+
+```{r}
+# A generic function to compute the in- or out-entropy value for a single node,
+# given a vector of its in- or out-commuting flows.
+entropy <- function(values, n = length(values)) {
+  normed <- values / sum(values)
+  # 0 values don't contribute to the sum
+  -sum(ifelse(normed == 0, 0, normed * log2(normed))) / log2(n)
+}
+
+# Tests
+entropy(c(5, 5, 5), 3) == 1
+entropy(c(0,0,100), 3) == 0
+entropy(c(100), 3) == 0
+```
+
+```{r}
+# Add in-entropy and out-entropy to the network objects!
+add_in_entropy <- function(g) {
+  if ("in_entropy" %in% colnames(g %N>% as_tibble())) {
+    warning("In-entropy has already been computed. Skipping.")
+    return(g)
+  }
+
+  g %>%
+    activate(nodes) %>%
+    mutate(
+      in_entropy = map_dbl(1:vcount(g), \(node) {
+        # Get all in-commuting flows to this node
+        g %>%
+          activate(edges) %>%
+          filter(to == node) %>%
+          pull(n) %>%
+          # Maximum number of edges to this node is 1 less than total nodes
+          entropy(num_nodes - 1)
+      })
+    )
+}
+
+add_out_entropy <- function(g) {
+  if ("out_entropy" %in% colnames(g %N>% as_tibble())) {
+    warning("Out-entropy has already been computed. Skipping.")
+    return(g)
+  }
+
+  g %>%
+    activate(nodes) %>%
+    mutate(
+      out_entropy = map_dbl(1:vcount(g), \(node) {
+        # Get all out-commuting flows from this node
+        g %>%
+          activate(edges) %>%
+          filter(from == node) %>%
+          pull(n) %>%
+          # Maximum number of edges from this node is 1 less than total nodes
+          entropy(vcount(g) - 1)
+      })
+    )
+}
+
+g2002 <- g2002 %>% add_in_entropy() %>% add_out_entropy()
+g2022 <- g2022 %>% add_in_entropy() %>% add_out_entropy()
+```
+
+```{r}
+map_in_entropy <- map_by("in_entropy", "In-commuting entropy", "In-entropy",
+  tm_scale_continuous_log(values = "brewer.reds", limits = c(0.75, 1)))
+map_in_entropy(2022)
+map_in_entropy(2002)
+```
+
+```{r}
+map_out_entropy <- map_by("out_entropy", "Out-commuting entropy", "Out-entropy",
+  tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4, 0.9)))
+map_out_entropy(2022)
+map_out_entropy(2002)
+```
+
+```{r, eval = FALSE}
+# TODO
+compare_years_plot <- function(variable) {
+  g1 <- g(2002)
+  g2 <- g(2022)
+  
+}
+```
+
+## K-cores
+
+```{r}
+g(2002) %>%
+  activate(edges) %>%
+  filter(n > quantile(n, 0.75)) %>%
+  activate(nodes) %>%
+  mutate(coreness = node_coreness()) %>%
+  as_tibble() %>%
+  st_as_sf() %>%
+  tm_shape() +
+  tm_polygons(fill = "coreness", fill.scale = tm_scale_ordinal())
+```
+
+## Structural equivalence
+
+```{r}
+get_dend <- function(g) {
+  adj <- as_adjacency_matrix(g, attr = "n", sparse = FALSE)
+  # Group community areas with similar in *and* out commuting
+  mtx_both <- rbind(adj, t(adj))
+
+  # Perform agglomerative clustering based on pairwise Pearson's correlations
+  hclust(as.dist(1 - cor(mtx_both), upper = FALSE), method = "ward.D")
+}
+add_structural_equiv <- function(g) {
+  if ("cluster" %in% colnames(g %N>% as_tibble())) {
+    g <- g %>% select(-cluster)
+  }
+
+  dendrogram <- get_dend(g)
+  # plot(dendrogram)
+
+  # Elbow plot shows that 5 clusters is a good choice for both years
+  # heights <- dendrogram$height
+  # num_clusters <- length(heights):1
+  # tibble(height = heights, num_clusters = num_clusters) %>%
+  #   filter(num_clusters <= 20) %>%
+  #   ggplot(aes(x = num_clusters, y = height)) +
+  #   geom_point() +
+  #   geom_line()
+
+  cluster_assignments <- cutree(dendrogram, k = 5) %>%
+    tibble(cluster = ., name = names(cluster))
+  # Add column to graph
+  g %>%
+    activate(nodes) %>%
+    left_join(cluster_assignments, by = "name")
+}
+
+g2002 <- add_structural_equiv(g2002)
+g2022 <- add_structural_equiv(g2022)
+
+map_struct_equiv <- map_by("cluster", "Structural equivalence class", "Structural Equivalence Clusters", scale = tm_scale_categorical())
+tmap_arrange(map_struct_equiv(2002), map_struct_equiv(2022))
+
+plot(get_dend(g2002))
+plot(get_dend(g2022))
+```
+
+## Regular equivalence/blockmodeling
+
+```{r}
+mat <- as_adjacency_matrix(g2002, attr = "n", sparse = FALSE)
+rege <- REGE.nm.for(mat)$E
+dend <- hclust(as.dist(1 - rege), method = "ward.D")
+
+plot(dend)
+
+plot.mat(mat, clu=cutree(dend, k=8))
+```
+
+# Feedback 4/17/25
+
+- Literature:
+  - Check labor literature; Detroit
+  - Redlining, history of Chicago
+  - Gold Coast/Slum book. Great American City book.
+  - Rob Simson (?)
+- Issues with the regression idea:
+  - Disruptions in 2008 and 2020
+  - Would have to control for a lot of things: population, overall economic change
+    (shouldn't be too hard)
+- Misc
+  - **How is virtual work captured in the survey?**
+  - Compute degree without self-ties so what we're measuring is **cross-neighborhood
+    commuting** patterns
+  - Justify my choice of Chicago as the boundary
+- Alternative ideas:
+  - Just narrow to COVID time frame, see what changed in the data
+  - Only do descriptive statistics. Longitudinal preferably. Could use blockmodeling
+    or community detection techniques or structural/regular equivalence.
+
+# Old Ideas
 
 ## Where people who live in a given CCA work?
 
@@ -89,9 +366,9 @@ because Hyde Park is home to the University of Chicago, most of its residents wo
 Woodlawn, on the other hand, has a shortage of local jobs, so most Woodlawn residents
 commute to the Loop.
 
-```{r where-people-work-functions, echo = FALSE}
+```{r where-people-work-functions, eval = FALSE}
 where_do_people_work <- function(cca) {
-  cca_flows %>%
+  cca_flows_2022 %>%
     filter(from == cca) %>%
     select(to, n) %>%
     arrange(desc(n))
@@ -130,58 +407,12 @@ where_do_people_work_plot("Woodlawn")
 where_do_people_work_plot("Hyde Park")
 ```
 
-## Node-link network diagram
-
-When we load the CCA commuting flows into `igraph`, here is what we get:
-
-```{r igraph}
-cca_graph <- tbl_graph(edges = cca_flows) %>%
-  # For some reason simply passing `nodes = community_areas` doesn't work
-  left_join(ccas, by = "name") %E>%
-  # Make edges weighted
-  mutate(weight = n)
-
-cca_graph %>% summary()
-```
-
-Notice that the number of edges is exactly the number of nodes squared. This is
-because all dyads are included in this network, even those that have zero
-commuting flow. The maximum number of edges is $n^2$ rather than $n(n-1)/2$ because
-self-edges are allowed.
-
-Here is a plot of the network with nodes colored according to their distance from
-the Loop:
-
-```{r network-plot, fig.width=12, fig.height=8}
-cca_graph %N>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  activate(edges) %>%
-  mutate(weight = n) %>%
-  filter(weight > quantile(weight, 0.6)) %>% # Keep only the biggest flows
-  ggraph(layout = "fr") +
-  geom_edge_link(
-    aes(edge_alpha = weight),
-    edge_width = 0.2, edge_color = "#000",
-  ) +
-  geom_node_point(aes(color = distance_from_loop), size = 3) +
-  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
-  theme_void() +
-  labs(
-    title = "Commuting Flows Between Chicago Community Areas",
-    color = "Distance from the Loop",
-    edge_alpha = "n"
-  )
-```
-
-The black dot in the middle is the Loop (downtown Chicago). The out-of-place 
-lighter blue dot near the central part of the network is O'Hare, which employs a lot of
-people despite being far from downtown.
 
 ## In and out degree
 
 In degree (number who work in this community area) is recorded in the `w_total` column:
 
-```{r in-degree}
+```{r in-degree, eval = FALSE}
 ccas %>%
   as_tibble() %>%
   select(name, w_total) %>%
@@ -190,7 +421,7 @@ ccas %>%
   head(6)
 ```
 
-```{r in-degree-plot}
+```{r in-degree-plot, eval = FALSE}
 ccas %>%
   filter(name != "OUTSIDE CHICAGO") %>%
   tm_shape() +
@@ -207,7 +438,7 @@ and Hyde Park).
 
 Out degree (number of workers who live in this community area) is recorded in the `h_total` column:
 
-```{r out-degree}
+```{r out-degree, eval = FALSE}
 ccas %>%
   as_tibble() %>%
   select(name, h_total) %>%
@@ -216,7 +447,7 @@ ccas %>%
   head(10)
 ```
 
-```{r out-degree-plot}
+```{r out-degree-plot, eval = FALSE}
 ccas %>%
   filter(name != "OUTSIDE CHICAGO") %>%
   tm_shape() +
@@ -231,7 +462,7 @@ Out degree isn't characterized by a few extreme outliers like in degree is. Howe
 clear trend on the map: North Side neighborhoods tend to have more working residents than South Side
 neighborhoods, where unemployment tends to be higher.
 
-```{r in-out-degree-scatter}
+```{r in-out-degree-scatter, eval = FALSE}
 ccas %>%
   select(name, w_total, h_total) %>%
   filter(name != "OUTSIDE CHICAGO") %>%
@@ -250,75 +481,6 @@ ccas %>%
 
 Not surprisingly, neighborhoods with more working residents tend to also have more jobs.
 
-## Eigenvector centrality
-
-```{r eigen}
-# Compute eigenvector centrality
-cca_graph <- cca_graph %N>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  mutate(eig_centrality = centrality_eigen(weights = n, directed = FALSE))
-
-# Also update the CCAs data frame
-ccas <- cca_graph %>%
-  as_tibble() %>%
-  select(name, eig_centrality) %>%
-  right_join(ccas, by = "name") %>%
-  st_as_sf()
-
-# Print the most central neighborhoods
-ccas %>%
-  as_tibble() %>%
-  select(name, eig_centrality) %>%
-  arrange(desc(eig_centrality)) %>%
-  head(10) %>%
-  print()
-
-# Plot a map of eigenvector centrality
-ccas %>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  tm_shape() +
-  tm_polygons(
-    fill = "eig_centrality",
-    fill.legend = tm_legend(title = "Eigenvector Centrality"),
-    fill.scale = tm_scale_continuous(values = "viridis"),
-  )
-```
-
-The node with highest eigenvector centrality is the Loop, followed by the neighborhoods
-north and west of the Loop. South Side community uniformly have very low eigenvector
-centrality.
-
-The plot below highlights the relationships between eigenvector centrality and geographic
-location.
-
-```{r eigen-vs-distance}
-cca_graph %N>%
-  as_tibble() %>%
-  mutate(area = if_else(
-    st_centroid(geometry) %>% st_coordinates() %>% .[, 2] >=
-      st_centroid(filter(ccas, name == "Near West Side")$geometry) %>%
-        st_coordinates() %>%
-        .[, 2],
-    "Northern",
-    "Southern"
-  )) %>%
-  arrange(desc(eig_centrality)) %>%
-  ggplot(aes(x = distance_from_loop, y = eig_centrality)) +
-  geom_point(aes(color = area)) +
-  geom_smooth(se = FALSE, method = "lm", size = 0.5, color = "black", formula = y ~ x) +
-  # geom_smooth(aes(color = area), se = FALSE, method = "lm", size = 0.5) +
-  geom_text_repel(aes(label = name), size = 2) +
-  scale_y_log10() +
-  scale_color_brewer(palette = "Set1") +
-  theme_classic() +
-  labs(
-    title = "Eigenvector Centrality vs. Distance from the Loop",
-    subtitle = '"Northern" neighborhoods are those that are at least as far north as the Near West Side.',
-    x = "Distance from the Loop (m)",
-    y = "Eigenvector Centrality",
-    color = "Area"
-  )
-```
 
 ## Local jobs availability
 
@@ -327,7 +489,7 @@ with the largest employment, like O'Hare and the Loop, there are many more jobs 
 residents. By contrast, many neighborhoods have nearly ten times as many working residents as jobs,
 so almost everyone must commute.
 
-```{r jobs-availability}
+```{r jobs-availability, eval = FALSE}
 ccas <- ccas %>%
   mutate(jobs_availability = w_total / h_total)
 
@@ -346,8 +508,8 @@ ccas %>%
 
 Intuitively, we would expect that commuting is higher between neighborhoods that are closer together.
 
-```{r distance-vs-size}
-cca_flows %>%
+```{r distance-vs-size, eval = FALSE}
+cca_flows_2022 %>%
   filter(from != "OUTSIDE CHICAGO", to != "OUTSIDE CHICAGO") %>%
   # Zero flows don't work with the log scale
   filter(n != 0) %>%
@@ -368,8 +530,6 @@ cca_flows %>%
   )
 ```
 
-# Discarded Ideas
-
 ## Modeling Commuting Patterns with an ERGM
 
 Modeling this dataset with an exponential random graph model (ERGM) would help understand what factors determine where people
@@ -377,7 +537,7 @@ work. However, the ERGMs we learned about in class only work with unweighted net
 Krivitsky (2012) extended the ERGM framework to networks with values that represent counts,
 which is what we have here.
 
-```{r ergm-setup, echo = TRUE}
+```{r ergm-setup, eval = FALSE}
 chicago_only <- cca_graph %N>%
   filter(name != "OUTSIDE CHICAGO")
 
@@ -390,7 +550,7 @@ net %v% "workers_log" <- log(chicago_only %N>% pull(w_from_chicago))
 # Network covariate: geographic distances
 # Make a full distance matrix. Recall that all dyads are represented in
 # cca_flows, not just non-zero edges.
-D <- cca_flows %>%
+D <- cca_flows_2022 %>%
   filter(from != "OUTSIDE CHICAGO", to != "OUTSIDE CHICAGO") %>%
   select(from, to, distance) %>%
   pivot_wider(names_from = to, values_from = distance) %>%
@@ -398,7 +558,7 @@ D <- cca_flows %>%
   as.matrix()
 ```
 
-```{r ergm-1, eval = FALSE, echo = TRUE}
+```{r ergm-1, eval = FALSE}
 fit1 <- ergm(
   net ~
     sum + # baseline intensity
@@ -410,76 +570,3 @@ fit1 <- ergm(
   response = "n",
 )
 ```
-
-## Plan
-
-Research question: **Do commuting patterns at the start of the 21st century help explain why
-some Chicago neighborhoods experienced greater economic improvement over the following two decades?**
-
-Dependent variable: Change in neighborhood SES 2002-2022. Could be measured by:
-
-- Unemployment rate
-- Poverty rate
-- Median household income
-- Vacant lot share
-- Median/average rent
-- A composite index of some or all of the above
-
-Independent variable: Commuting network measures. Could include:
-
-- Eigenvector centrality.
-- Outflow entropy (diversity).
-- Inbound job density. Number of inbound commuters per local resident.
-- Tie strength to high-opportunity areas: weighted sum of outbound commuters to high-income
-  job zones.
-- Commuting asymmetry (workers in vs workers out)
-
-Questions and concerns:
-
-- Why does this actually matter? Don't want this to just be another "oh look, there's a correlation!" study
-- Theory behind any of these relationships?
-
-Next steps:
-
-1. Modify data fetching code to get LODES for 2002.
-2. Fetch data (ACS? Census? CMAP?) for poverty rate and average rent in 2002 and 2022 (and years in between? why not).
-3. Compute dependent variables (change in poverty rate).
-3. Compute network independent variables.
-4. Fit an awesome model
-5. Interpret results
-
-<!-- ## Loose ideas
-
-- Get some covariate data:
-  - Populations
-  - Cost of living (average rent, probably)
-  - Median income?
-- Spatial autocorrelation models
-- Experiment with some community-finding algorithms
-- Get longitudinal data. See what's changed in the past 20 years.
-- Entropy
-- Probably outside the scope of this project (avenues for future work):
-  - Analyze multiple cities
-  - Include entire commuting area (suburbs) in the analysis
-  - Use RSiena to do the same thing with a better model -->
-
-# Feedback 4/17/25
-
-- Literature:
-  - Check labor literature; Detroit
-  - Redlining, history of Chicago
-  - Gold Coast/Slum book. Great American City book.
-  - Rob Simson (?)
-- Issues with the regression idea:
-  - Disruptions in 2008 and 2020
-  - Would have to control for a lot of things: population, overall economic change
-    (shouldn't be too hard)
-- Misc
-  - **How is virtual work captured in the survey?**
-  - Compute degree without self-ties so what we're measuring is **cross-neighborhood
-    commuting** patterns
-  - Justify my choice of Chicago as the boundary
-- Alternative ideas:
-  - Just narrow to COVID time frame, see what changed in the data
-  - Only do descriptive statistics. Longitudinal preferably. Could use blockmodeling
-    or community detection techniques or structural/regular equivalence.

@@ -1,5 +1,8 @@
 # Zeke's SOC618 (Social Network Analysis) Project
 
+To run the analysis, simply run all cells of `main.Rmd`, which sources `setup.R` to fetch the
+needed data.
+
 ## Data Sources
 
 ### LODES
