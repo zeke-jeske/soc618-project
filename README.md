@@ -3,6 +3,9 @@
 To run the analysis, simply run all cells of `main.Rmd`, which sources `setup.R` to fetch the
 needed data.
 
+Also—apologies! This code is a bit of a mess—not normally my coding style, but once
+in a while it's good to let myself be less perfectionist. :)
+
 ## Data Sources
 
 ### LODES

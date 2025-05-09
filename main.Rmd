@@ -19,22 +19,19 @@ suppressPackageStartupMessages({
   library(tmap)
   library(ggrepel)
   library(blockmodeling)
+  library(knitr) # kable
 })
 ```
 
-# Final Visualizations
-
-## Introductory Visualizations
-
 ```{r utility-functions}
 create_graph <- function(flows) {
-  g <- tbl_graph(edges = flows) %>%
+  g <- tbl_graph(edges = flows, nodes = ccas) %>%
     activate(edges) %>%
-    # Make edges weighted by flow size
-    mutate(weight = n) %>%
+    mutate(
+      from_name = .N()$name[from],
+      to_name = .N()$name[to]
+    ) %>%
     activate(nodes) %>%
-    # For some reason simply passing `nodes = ccas` doesn't work, but this does the same
-    left_join(ccas, by = "name") %>%
     # Compute centrality measures
     mutate(
       in_degree = centrality_degree(weights = n, mode = "in"),
@@ -71,109 +68,7 @@ g2022 %>% vcount()
 g2022 %E>% filter(n > 0) %>% ecount()
 ```
 
-```{r network-plot, fig.width=12, fig.height=8}
-set.seed(1)
-g2022 %>%
-  activate(edges) %>%
-  mutate(weight = n) %>%
-  filter(weight > quantile(weight, 0.6)) %>% # Keep only the biggest flows
-  activate(nodes) %>%
-  # Meters to km
-  mutate(distance_from_loop = distance_from_loop / 1000) %>%
-  ggraph(layout = "fr") +
-  geom_edge_link(
-    aes(edge_alpha = weight),
-    edge_width = 0.2, edge_color = "#000",
-  ) +
-  geom_node_point(aes(color = distance_from_loop), size = 3) +
-  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
-  theme_void() +
-  theme_graph(
-    plot_margin = margin(10, 10, 10, 10),
-  ) +
-  theme(
-    legend.background = element_rect(),
-    legend.margin = margin(8,8,8,8),
-    legend.position = "inside",
-    legend.position.inside = c(0.95, 0.05),
-    legend.justification = c(1, 0),
-    legend.box.just = "right",
-    legend.box.margin = margin(6, 6, 6, 6),
-  ) +
-  labs(
-    color = "Distance from the Loop, km",
-    edge_alpha = "Commuting flow"
-  )
-```
-## In-degree, out-degree, and eigenvector centrality
-
-```{r in-degree-plot}
-# Higher-order function to create map plotting functions that change fill according to some variable
-map_by <- function(variable, legend_label, title, scale) {
-  function(year) {
-    get_sf(year) %>%
-      tm_shape() +
-      tm_polygons(
-        fill = variable,
-        fill.legend = tm_legend(title = legend_label),
-        fill.scale = scale,
-      ) +
-      tm_title(glue("{title} ({year})"))
-  }
-}
-
-map_in_degree <- map_by("in_degree", "In-commuting flow", "Inter-CCA In-commuting", tm_scale_continuous_log(values = "brewer.oranges", limits = c(100, 300000)))
-
-map_in_degree(2002)
-map_in_degree(2022)
-```
-
-```{r out-degree-plot}
-map_out_degree <- map_by("out_degree", "Out-commuting flow", "Inter-CCA Out-commuting", tm_scale_continuous_log(values = "brewer.blues", limits = c(500, 40000)))
-
-# Side by side
-tmap_arrange(map_out_degree(2002), map_out_degree(2022))
-```
-
-```{r}
-map_eigen <- map_by("eigen", "Eigenvector centrality", "Eigenvector Centrality",
-  tm_scale_continuous_log(values = "viridis", limits = c(0.0001, 1)))
-map_eigen(2002)
-map_eigen(2022)
-```
-
-```{r eigen-vs-distance, eval = FALSE}
-cca_graph %N>%
-  as_tibble() %>%
-  mutate(area = if_else(
-    st_centroid(geometry) %>% st_coordinates() %>% .[, 2] >=
-      st_centroid(filter(ccas, name == "Near West Side")$geometry) %>%
-        st_coordinates() %>%
-        .[, 2],
-    "Northern",
-    "Southern"
-  )) %>%
-  arrange(desc(eig_centrality)) %>%
-  ggplot(aes(x = distance_from_loop, y = eig_centrality)) +
-  geom_point(aes(color = area)) +
-  geom_smooth(se = FALSE, method = "lm", size = 0.5, color = "black", formula = y ~ x) +
-  # geom_smooth(aes(color = area), se = FALSE, method = "lm", size = 0.5) +
-  geom_text_repel(aes(label = name), size = 2) +
-  scale_y_log10() +
-  scale_color_brewer(palette = "Set1") +
-  theme_classic() +
-  labs(
-    title = "Eigenvector Centrality vs. Distance from the Loop",
-    subtitle = '"Northern" neighborhoods are those that are at least as far north as the Near West Side.',
-    x = "Distance from the Loop (m)",
-    y = "Eigenvector Centrality",
-    color = "Area"
-  )
-```
-
-## In-entropy and out-entropy
-
-`igraph` implements entropy with the `diversity()` function, but only for undirected graphs, so
+**Compute entropy measures.** `igraph` implements entropy with the `diversity()` function, but only for undirected graphs, so
 we'll have to implement in- and out-entropy ourselves.
 
 ```{r}
@@ -185,10 +80,10 @@ entropy <- function(values, n = length(values)) {
   -sum(ifelse(normed == 0, 0, normed * log2(normed))) / log2(n)
 }
 
-# Tests
-entropy(c(5, 5, 5), 3) == 1
-entropy(c(0,0,100), 3) == 0
-entropy(c(100), 3) == 0
+# Tests. These all return TRUE.
+# entropy(c(5, 5, 5), 3) == 1
+# entropy(c(0,0,100), 3) == 0
+# entropy(c(100), 3) == 0
 ```
 
 ```{r}
@@ -209,7 +104,7 @@ add_in_entropy <- function(g) {
           filter(to == node) %>%
           pull(n) %>%
           # Maximum number of edges to this node is 1 less than total nodes
-          entropy(num_nodes - 1)
+          entropy(vcount(g) - 1)
       })
     )
 }
@@ -239,27 +134,302 @@ g2002 <- g2002 %>% add_in_entropy() %>% add_out_entropy()
 g2022 <- g2022 %>% add_in_entropy() %>% add_out_entropy()
 ```
 
-```{r}
-map_in_entropy <- map_by("in_entropy", "In-commuting entropy", "In-entropy",
-  tm_scale_continuous_log(values = "brewer.reds", limits = c(0.75, 1)))
-map_in_entropy(2022)
-map_in_entropy(2002)
-```
+## What proportion of Chicago workers commute from outside Chicago?
+
+I use these figures in my data section.
 
 ```{r}
-map_out_entropy <- map_by("out_entropy", "Out-commuting entropy", "Out-entropy",
-  tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4, 0.9)))
-map_out_entropy(2022)
-map_out_entropy(2002)
+tract_flows <- read_csv("data/tract_flows_2022.csv", col_types = "cci")
+tract_to_cca <- tracts %>% as_tibble() %>% select(GEOID, cca)
+# The cca_flows data frames don't include anything outside Chicago, so we have
+# to do these joins again.
+tract_flows %>%
+  left_join(tract_to_cca, by = join_by(w_tract == GEOID)) %>%
+  rename(w_cca = cca) %>%
+  left_join(tract_to_cca, by = join_by(h_tract == GEOID)) %>%
+  rename(h_cca = cca) %>%
+  mutate(works_in_chicago = !is.na(w_cca), lives_in_chicago = !is.na(h_cca)) %>%
+  group_by(works_in_chicago, lives_in_chicago) %>%
+  summarize(n = sum(n), .groups = "drop")
 ```
 
-```{r, eval = FALSE}
-# TODO
-compare_years_plot <- function(variable) {
-  g1 <- g(2002)
-  g2 <- g(2022)
-  
+## Node-link diagram
+
+```{r network-plot, fig.width=12, fig.height=8}
+set.seed(1)
+g2022 %>%
+  activate(edges) %>%
+  filter(n > quantile(n, 0.6)) %>% # Keep only the biggest flows
+  activate(nodes) %>%
+  # Meters to km
+  mutate(distance_from_loop = distance_from_loop / 1000) %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(
+    aes(edge_alpha = n),
+    edge_width = 0.2, edge_color = "#000",
+  ) +
+  geom_node_point(aes(color = distance_from_loop), size = 3) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 3) +
+  theme_void() +
+  theme_graph(
+    plot_margin = margin(10, 10, 10, 10),
+  ) +
+  theme(
+    legend.background = element_rect(),
+    legend.margin = margin(8,8,8,8),
+    legend.position = "inside",
+    legend.position.inside = c(0.95, 0.05),
+    legend.justification = c(1, 0),
+    legend.box.just = "right",
+    legend.box.margin = margin(6, 6, 6, 6),
+  ) +
+  labs(
+    color = "Distance from the Loop, km",
+    edge_alpha = "Commuting flow"
+  )
+```
+## In-degree
+
+```{r in-degree-plot}
+# Higher-order function to create map plotting functions that change fill according to some variable
+map_by <- function(variable, legend_label, title, scale) {
+  function(year) {
+    get_sf(year) %>%
+      tm_shape() +
+      tm_polygons(
+        fill = variable,
+        fill.legend = tm_legend(title = legend_label),
+        fill.scale = scale,
+      ) +
+      tm_title(glue("{title} ({year})"))
+  }
 }
+
+map_in_degree <- map_by("in_degree", "In-commuting flow", "Inter-CCA In-commuting", tm_scale_continuous_log(values = "brewer.oranges", limits = c(100, 300000)))
+
+map_in_degree(2002)
+map_in_degree(2022)
+```
+
+Change in in-degree from 2002 to 2022.
+
+```{r}
+vars <- c("in_degree", "out_degree", "eigen", "in_entropy", "out_entropy")
+
+combined <- left_join(
+  g2002 %N>% as_tibble() %>% select(name, all_of(vars)),
+  # geometry comes from this one
+  get_sf(2022) %>% select(name, all_of(vars)),
+  by = "name",
+  suffix = c("_2002", "_2022")
+) %>% st_as_sf()
+
+# Scatter plot (not used)
+combined %>%
+  ggplot(aes(x = in_degree_2002, in_degree_2022)) +
+  geom_point() +
+  geom_text_repel(aes(label = name)) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_smooth(se = FALSE) +
+  scale_x_log10() +
+  scale_y_log10()
+
+pct_change_map <- function(df, legend_title) {
+  df %>%
+  tm_shape() +
+  tm_polygons(
+    fill = "pct_change",
+    fill.scale = tm_scale_continuous(
+      values = "brewer.rd_bu", limits = c(-1, 1),
+      labels = c("-100%", "-50%", "0%", "+50%", "+100% or more"),
+      midpoint = 0,
+      outliers.trunc = c(TRUE, TRUE)
+    ),
+    fill.legend = tm_legend(title = legend_title)
+  )
+}
+
+combined %>%
+  mutate(
+    change = in_degree_2022 - in_degree_2002,
+    pct_change = in_degree_2022 / in_degree_2002 - 1
+  ) %>%
+  pct_change_map("In-degree % change")
+```
+
+## Out-degree
+
+```{r out-degree-plot}
+map_out_degree <- map_by("out_degree", "Out-commuting flow", "Inter-CCA Out-commuting", tm_scale_continuous_log(values = "brewer.blues", limits = c(500, 40000)))
+
+map_out_degree(2002)
+map_out_degree(2022)
+
+combined %>%
+  mutate(
+    change = out_degree_2022 - out_degree_2002,
+    pct_change = out_degree_2022 / out_degree_2002 - 1
+  ) %>%
+  pct_change_map("Out-degree % change")
+```
+
+## Eigenvector centrality
+
+```{r}
+map_eigen <- map_by("eigen", "Eigenvector centrality", "Eigenvector Centrality",
+  tm_scale_continuous_log(values = "viridis", limits = c(0.0001, 1)))
+map_eigen(2002)
+map_eigen(2022)
+combined %>%
+  mutate(pct_change = eigen_2022 / eigen_2002 - 1) %>%
+  pct_change_map("Percent change")
+```
+
+```{r eigen-vs-distance, eval = FALSE}
+# Not included
+cca_graph %N>%
+  as_tibble() %>%
+  mutate(area = if_else(
+    st_centroid(geometry) %>% st_coordinates() %>% .[, 2] >=
+      st_centroid(filter(ccas, name == "Near West Side")$geometry) %>%
+        st_coordinates() %>%
+        .[, 2],
+    "Northern",
+    "Southern"
+  )) %>%
+  arrange(desc(eig_centrality)) %>%
+  ggplot(aes(x = distance_from_loop, y = eig_centrality)) +
+  geom_point(aes(color = area)) +
+  geom_smooth(se = FALSE, method = "lm", size = 0.5, color = "black", formula = y ~ x) +
+  # geom_smooth(aes(color = area), se = FALSE, method = "lm", size = 0.5) +
+  geom_text_repel(aes(label = name), size = 2) +
+  scale_y_log10() +
+  scale_color_brewer(palette = "Set1") +
+  theme_classic() +
+  labs(
+    title = "Eigenvector Centrality vs. Distance from the Loop",
+    subtitle = '"Northern" neighborhoods are those that are at least as far north as the Near West Side.',
+    x = "Distance from the Loop (m)",
+    y = "Eigenvector Centrality",
+    color = "Area"
+  )
+```
+
+## In-entropy
+
+```{r}
+map_in_entropy <- map_by("in_entropy", "In-entropy", "In-entropy",
+  tm_scale_continuous_log(values = "brewer.reds", limits = c(0.75, 1)))
+map_in_entropy(2002)
+map_in_entropy(2022)
+raw_change_map <- function(df, legend_title) {
+  df %>%
+    tm_shape() +
+    tm_polygons(
+      fill = "change",
+      fill.scale = tm_scale_continuous(
+        values = "brewer.rd_bu", limits = c(-0.2, 0.2),
+        labels = c("-0.2", "-0.1", "0", "+0.1", "+0.2"),
+        midpoint = 0
+      ),
+      fill.legend = tm_legend(title = legend_title)
+    )
+}
+combined %>%
+  mutate(change = in_entropy_2022 - in_entropy_2002) %>%
+  raw_change_map("In-entropy change")
+```
+
+## Out-entropy
+
+```{r}
+map_out_entropy <- map_by("out_entropy", "Out-entropy", "Out-entropy",
+  tm_scale_continuous_log(values = "brewer.purples", limits = c(0.4, 0.9)))
+map_out_entropy(2002)
+map_out_entropy(2022)
+combined %>%
+  mutate(change = out_entropy_2022 - out_entropy_2002) %>%
+  raw_change_map("Out-entropy change")
+```
+
+## Table
+
+```{r}
+df <- combined %>%
+  as_tibble() %>%
+  select(name, contains("_20")) %>%
+  pivot_longer(
+    contains("_20"),
+    names_to = c("variable", "year"), values_to = "value",
+    names_pattern = r"(^([a-z_]+)_(\d{4})$)"
+  ) %>%
+  # This is the order of the variables I've been using in my paper
+  mutate(variable = factor(variable, levels = c("in_degree", "out_degree", "eigen", "in_entropy", "out_entropy"))) %>%
+  # Unpivot the years, which we want in separate columns so we can take the difference
+  pivot_wider(names_from = year, values_from = value, names_prefix = "value_") %>%
+  mutate(change = value_2022 - value_2002, pct_change = (value_2022 / value_2002 - 1) * 100) %>%
+  pivot_longer(
+    c(value_2002, value_2022, change, pct_change),
+    names_to = "subvariable", values_to = "value",
+    names_transform = . %>% str_replace("value_", "")
+  )
+
+df %>%
+  group_by(variable, subvariable) %>%
+  summarize(mean = mean(value), sd = sd(value), se = sd / sqrt(77), med = median(value))
+
+t.test(combined$in_degree_2022, combined$in_degree_2002, paired = TRUE)
+t.test(combined$out_degree_2022, combined$out_degree_2002, paired = TRUE)
+t.test(combined$eigen_2022, combined$eigen_2002, paired = TRUE)
+t.test(combined$in_entropy_2022, combined$in_entropy_2002, paired = TRUE)
+t.test(combined$out_entropy_2022, combined$out_entropy_2002, paired = TRUE)
+
+ggplot(combined, aes(x = eigen_2002)) +
+  geom_density()
+```
+
+## Mean distance commuted
+
+```{r}
+mean_distances <- g2002 %>%
+  activate(edges) %>%
+  as_tibble() %>%
+  # cca_distances uses CCA names, not the same indexes as the graphs
+  left_join(cca_distances, by = c("from_name" = "from", "to_name" = "to")) %>%
+  group_by(from_name) %>%
+  summarize(mean_distance = sum(n * distance) / sum(n)) %>%
+  rename(from = "from_name")
+
+g2002 %>%
+  activate(nodes) %>%
+  left_join(mean_distances, by = c(name = "from")) %>%
+  as_tibble() %>%
+  st_as_sf() %>%
+  tm_shape() +
+  tm_polygons(
+    fill = "mean_distance",
+    fill.scale = tm_scale_continuous(values = "viridis", limits = c(4000, 25000))
+  )
+
+mean_distances2 <- g2022 %>%
+  activate(edges) %>%
+  as_tibble() %>%
+  # cca_distances uses CCA names, not the same indexes as the graphs
+  left_join(cca_distances, by = c("from_name" = "from", "to_name" = "to")) %>%
+  group_by(from_name) %>%
+  summarize(mean_distance = sum(n * distance) / sum(n)) %>%
+  rename(from = "from_name")
+
+g2022 %>%
+  activate(nodes) %>%
+  left_join(mean_distances2, by = c(name = "from")) %>%
+  as_tibble() %>%
+  st_as_sf() %>%
+  tm_shape() +
+  tm_polygons(
+    fill = "mean_distance",
+    fill.scale = tm_scale_continuous(values = "viridis", limits = c(4000, 25000))
+  )
 ```
 
 ## K-cores
@@ -406,80 +576,6 @@ where_do_people_work_plot <- function(cca) {
 where_do_people_work_plot("Woodlawn")
 where_do_people_work_plot("Hyde Park")
 ```
-
-
-## In and out degree
-
-In degree (number who work in this community area) is recorded in the `w_total` column:
-
-```{r in-degree, eval = FALSE}
-ccas %>%
-  as_tibble() %>%
-  select(name, w_total) %>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  arrange(desc(w_total)) %>%
-  head(6)
-```
-
-```{r in-degree-plot, eval = FALSE}
-ccas %>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  tm_shape() +
-  tm_polygons(
-    fill = "w_total",
-    fill.legend = tm_legend(title = "Jobs"),
-    fill.scale = tm_scale_continuous_log10(values = "viridis"),
-  )
-```
-
-The commuting areas with the most jobs are those in the central city (the Loop, Near North
-Side, Near West Side, and West Town) or those that contain a major employer (O'Hare
-and Hyde Park).
-
-Out degree (number of workers who live in this community area) is recorded in the `h_total` column:
-
-```{r out-degree, eval = FALSE}
-ccas %>%
-  as_tibble() %>%
-  select(name, h_total) %>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  arrange(desc(h_total)) %>%
-  head(10)
-```
-
-```{r out-degree-plot, eval = FALSE}
-ccas %>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  tm_shape() +
-  tm_polygons(
-    fill = "h_total",
-    fill.legend = tm_legend(title = "Employed Residents"),
-    fill.scale = tm_scale_continuous_log10(values = "viridis"),
-  )
-```
-
-Out degree isn't characterized by a few extreme outliers like in degree is. However, notice the
-clear trend on the map: North Side neighborhoods tend to have more working residents than South Side
-neighborhoods, where unemployment tends to be higher.
-
-```{r in-out-degree-scatter, eval = FALSE}
-ccas %>%
-  select(name, w_total, h_total) %>%
-  filter(name != "OUTSIDE CHICAGO") %>%
-  ggplot(aes(x = h_total, y = w_total)) +
-  geom_point() +
-  # geom_smooth(se = FALSE, method = "lm", size = 0.5) +
-  geom_text_repel(aes(label = name), size = 2, max.overlaps = 2) +
-  scale_y_log10() +
-  theme_minimal() +
-  labs(
-    title = "In Degree vs. Out Degree",
-    x = "Employed residents (out degree)",
-    y = "Jobs (in degree)"
-  )
-```
-
-Not surprisingly, neighborhoods with more working residents tend to also have more jobs.
 
 
 ## Local jobs availability

@@ -61,7 +61,7 @@ if (file.exists(ccas_path)) {
 
 if (file.exists(cca_distances_path)) {
   message(glue("{cca_distances_path} already exists, so leaving it as-is."))
-  # TODO cca_distances <- read_csv(cca_distances)
+  cca_distances <- read_csv(cca_distances_path, col_types = "ccd")
 } else {
   message("Calculating pairwise distances between all CCAs...")
   # Get the distance between centroids of every pair of community areas
